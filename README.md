@@ -64,12 +64,13 @@ lib/
 └── server.ts # Server Supabase client
 
 scripts/
-└── 001_create_workflows_table.sql # Database schema setup
+├── 001_create_workflows_table.sql # Database schema setup
+└── 002_move_tables_to_rag_demo_schema.sql # Moves tables into the rag_demo schema
 \`\`\`
 
 ### Database Schema
 
-The application uses four Supabase tables:
+The application uses four Supabase tables, all in the `rag_demo` schema:
 
 **workflows** - Main workflow state and metadata
 
@@ -140,8 +141,11 @@ npm install
 
 # Run database migrations
 
-In Supabase dashboard, use the Scripts runner to execute:
+In Supabase dashboard, use the Scripts runner to execute, in order:
 scripts/001_create_workflows_table.sql
+scripts/002_move_tables_to_rag_demo_schema.sql
+
+# Then add `rag_demo` to Project Settings > Data API > Exposed schemas
 
 # Run development server
 
@@ -172,10 +176,11 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000  # Or your deployment URL
 
 ### 1. Set Up Database
 
-Before first use, run the database migration:
+Before first use, run the database migrations in order:
 
-1. Run `scripts/001_create_workflows_table.sql`
-2. This creates all necessary tables with proper indexes and triggers
+1. Run `scripts/001_create_workflows_table.sql` — creates all tables with proper indexes and triggers (in `public`)
+2. Run `scripts/002_move_tables_to_rag_demo_schema.sql` — moves those tables into a dedicated `rag_demo` schema
+3. In the Supabase dashboard, add `rag_demo` to the exposed schemas (Project Settings > Data API > Exposed schemas) so PostgREST can serve it
 
 ### 2. Create a New Workflow
 
@@ -384,8 +389,8 @@ Add comprehensive monitoring:
 If you encounter database errors:
 
 1. **Check environment variables**: Ensure all Supabase env vars are set
-2. **Verify migration**: Run `scripts/001_create_workflows_table.sql`
-3. **Check Supabase dashboard**: Verify tables exist
+2. **Verify migrations**: Run `scripts/001_create_workflows_table.sql` then `scripts/002_move_tables_to_rag_demo_schema.sql`
+3. **Check Supabase dashboard**: Verify tables exist in the `rag_demo` schema and that `rag_demo` is listed under Exposed schemas
 
 ### "Workflow Not Found" Error
 

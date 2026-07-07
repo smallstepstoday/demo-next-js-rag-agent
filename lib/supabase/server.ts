@@ -11,10 +11,14 @@ import { createClient as supabaseCreateClient } from "@supabase/supabase-js";
  * AUTHENTICATION STRATEGY:
  *   - Uses the ANON KEY (NEXT_PUBLIC_SUPABASE_ANON_KEY) rather than the service role key.
  *   - Table-level permissions are granted to the `anon` Postgres role via:
- *       GRANT ALL ON TABLE public.<table> TO anon;
- *     This is configured in `scripts/001_create_workflows_table.sql`.
+ *       GRANT ALL ON TABLE rag_demo.<table> TO anon;
+ *     This is configured in `scripts/001_create_workflows_table.sql` and
+ *     `scripts/002_move_tables_to_rag_demo_schema.sql`.
  *   - RLS is disabled on these tables, so the anon key has full CRUD access.
  *   - If you later enable RLS, add appropriate policies or switch to the service role key.
+ *   - Tables live in the `rag_demo` schema (not `public`), so both clients pass
+ *     `db: { schema: "rag_demo" }`. That schema must also be added to the
+ *     Supabase project's exposed schemas (Project Settings > Data API).
  *
  * WHY NOT THE SERVICE ROLE KEY?
  *   The runtime environment returns "Invalid request" when using the service role JWT.
@@ -36,6 +40,7 @@ export async function createClient() {
         autoRefreshToken: false,
         persistSession: false,
       },
+      db: { schema: "rag_demo" },
     },
   );
 }
