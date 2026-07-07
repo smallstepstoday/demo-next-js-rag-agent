@@ -1,0 +1,457 @@
+# Next.js RAG Agent - Biography Workflow
+
+A minimal Next.js application demonstrating a single-path RAG (Retrieval-Augmented Generation) biography workflow using the AI SDK, DurableAgent workflow steps, and Supabase for persistence.
+
+## Overview
+
+This application implements a complete 9-step workflow for generating and managing AI-powered biographical descriptions:
+
+1. **User initiates workflow** - User indicates they want to send a link via email
+2. **Email input** - UI displays a field for entering the recipient's email
+3. **Form link sent** - System sends an email to the recipient with a unique form link
+4. **Recipient fills form** - Recipient clicks link and fills out their information
+5. **RAG-backed AI generation** - System retrieves relevant biography guidance and generates a biographical description using AI
+6. **Pending approval** - Description appears on user's dashboard for review
+7. **Review page** - User clicks to view full description with approve/disapprove options
+8. **Approval flow** - If approved, system sends biography to recipient via email
+9. **Disapproval flow** - If disapproved, system sends feedback to recipient
+
+## Architecture
+
+### Key Technologies
+
+- **Next.js 16** - React framework with App Router
+- **AI SDK v5** - For AI text generation (biography creation)
+- **DurableAgent / WDK-style steps** - Workflow definition kept in sync with the API route flow
+- **Supabase** - PostgreSQL database for persistent workflow storage
+- **TypeScript** - Type-safe development
+- **Tailwind CSS v4** - Styling
+- **shadcn/ui** - UI component library
+
+### Project Structure
+
+\`\`\`
+app/
+├── page.tsx # User landing page (Steps 1-2, 6)
+├── form/[workflowId]/
+│ ├── page.tsx # Recipient form page (Step 4)
+│ └── success/page.tsx # Form submission success
+├── review/[workflowId]/page.tsx # Biography review (Step 7)
+├── workflows/
+│ └── biography-workflow.ts # DurableAgent workflow definition
+└── api/
+└── workflows/
+├── create/route.ts # Create workflow (Step 3)
+├── [workflowId]/
+│ ├── submit/route.ts # Submit form (Step 4-5)
+│ ├── approve/route.ts # Approve biography (Step 8)
+│ └── disapprove/route.ts # Disapprove biography (Step 9)
+
+components/
+├── email-form.tsx # Email input form
+├── workflow-list.tsx # Workflow status cards
+├── recipient-form.tsx # Information collection form
+├── biography-review.tsx # Review and approval interface
+└── ui/ # shadcn/ui components
+
+lib/
+├── biography-generation.ts # Shared RAG retrieval, prompt construction, and generation
+├── workflow-types.ts # TypeScript types for workflow
+├── workflow-store.ts # Supabase-backed state management
+├── email-service.ts # Email sending (simulated)
+└── supabase/
+├── client.ts # Browser Supabase client
+└── server.ts # Server Supabase client
+
+scripts/
+└── 001_create_workflows_table.sql # Database schema setup
+\`\`\`
+
+### Database Schema
+
+The application uses four Supabase tables:
+
+**workflows** - Main workflow state and metadata
+
+- `id` (TEXT): Unique workflow identifier
+- `recipient_email` (TEXT): Recipient's email address
+- `initiated_by_email` (TEXT): User who created the workflow
+- `status` (TEXT): Current workflow state
+- `created_at`, `updated_at` (TIMESTAMP): Timestamps
+
+**workflow_recipients** - Recipient information from forms
+
+- `workflow_id` (TEXT): References workflows table
+- `full_name`, `email`, `occupation` (TEXT): Basic info
+- `skills` (JSONB): Array of skills
+- `bio_context` (TEXT): Biography context
+- `submitted_at` (TIMESTAMP): Submission time
+
+**workflow_biographies** - AI-generated biographies
+
+- `workflow_id` (TEXT): References workflows table
+- `biography_text` (TEXT): Generated biography
+- `approved` (BOOLEAN): Approval status
+- `rejection_reason` (TEXT): Reason if rejected
+- `generated_at`, `reviewed_at` (TIMESTAMP): Timestamps
+
+**bio_reference_documents** - Retrieved context for RAG generation
+
+- `id` (TEXT): Stable document identifier
+- `title` (TEXT): Reference document title
+- `category` (TEXT): Role or topic category
+- `content` (TEXT): Writing guidance retrieved during generation
+- `created_at` (TIMESTAMP): Timestamp
+
+### Workflow State Management
+
+The application uses Supabase (PostgreSQL) for persistent storage:
+
+- **Durable**: Workflows persist across server restarts
+- **Scalable**: Supports multiple server instances
+- **Queryable**: Full SQL query capabilities
+- **Real-time**: Can add Supabase real-time subscriptions
+
+The active demo UI has one execution path:
+
+1. The operator creates a workflow and sends the mock form-link email from `POST /api/workflows/create`.
+2. The recipient submits `/form/[workflowId]`, which calls `POST /api/workflows/[workflowId]/submit`.
+3. The submit route stores recipient data, retrieves `bio_reference_documents`, enhances the prompt, generates the biography, saves it, and marks the workflow pending review.
+4. The operator approves or disapproves from `/review/[workflowId]`.
+5. The approval route sends the approved biography through the shared mock email service, or the disapproval route sends feedback through that same service.
+
+The DurableAgent-oriented workflow definition in `app/workflows/biography-workflow.ts` is kept aligned with that path by calling the same `lib/biography-generation.ts` module used by the submit API route. That prevents the workflow step from bypassing reference retrieval or using a different generation prompt.
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18+
+- npm, pnpm, or yarn
+- Supabase project
+
+### Installation
+
+\`\`\`bash
+
+# Install dependencies
+
+npm install
+
+# Run database migrations
+
+In Supabase dashboard, use the Scripts runner to execute:
+scripts/001_create_workflows_table.sql
+
+# Run development server
+
+```
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) to see the application.
+
+### Environment Variables
+
+The following environment variables are required:
+
+```env
+# Supabase Configuration
+NEXT_PUBLIC_SUPABASE_URL=your-project-url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# PostgreSQL Direct Connection (auto-configured)
+POSTGRES_URL=your-postgres-url
+
+# Application Configuration
+NEXT_PUBLIC_APP_URL=http://localhost:3000  # Or your deployment URL
+```
+
+## Usage
+
+### 1. Set Up Database
+
+Before first use, run the database migration:
+
+1. Run `scripts/001_create_workflows_table.sql`
+2. This creates all necessary tables with proper indexes and triggers
+
+### 2. Create a New Workflow
+
+1. Enter a recipient's email address in the form
+2. Click "Send Link"
+3. System creates workflow and "sends" email (logged to console)
+4. Workflow is now stored in Supabase and persists across page reloads
+
+### 3. Recipient Fills Form
+
+1. Navigate to `/form/[workflowId]` (copy from console or workflow card)
+2. Fill out biographical information:
+   - Name, occupation, years of experience
+   - Skills (add multiple)
+   - Achievements and interests
+3. Submit form
+4. Data is saved to Supabase, reference documents are retrieved, and the biography is generated before the success page is shown
+
+### 4. AI Biography Generation
+
+- System retrieves relevant biography reference documents from Supabase based on the submitted occupation and skills
+- Retrieved context is inserted into the generation prompt
+- System automatically generates biography using AI SDK
+- Biography is saved to Supabase
+- Status updates to "Pending Your Approval"
+
+## RAG Implementation
+
+This demo implements a lightweight RAG path without vector search. The `bio_reference_documents` table acts as the external knowledge source. When a recipient submits their form, the submit API retrieves relevant reference documents, ranks them against the submitted occupation and skills, and augments the model prompt with the best matches before generating the biography.
+
+The submit API route and DurableAgent workflow step both use `lib/biography-generation.ts` for retrieval, prompt construction, and AI generation. If you need to verify retrieval during a run, watch the server logs for `Biography generation - Retrieved biography references:` followed by the selected document titles.
+
+For a production-grade RAG system, this could be extended with embeddings, Supabase `pgvector`, document ingestion, and similarity search.
+
+### 5. Review and Approve/Disapprove
+
+1. Click "Review Biography" on the workflow card
+2. Review generated biography and recipient information
+3. Either:
+   - **Approve**: Sends biography to recipient
+   - **Disapprove**: Provide reason, sends feedback to recipient
+4. Decision is persisted in Supabase
+
+## Email System
+
+The application simulates email sending by logging to the console. In production, integrate with:
+
+- **Resend** - Modern email API (recommended)
+- **SendGrid** - Enterprise email service
+- **AWS SES** - AWS email service
+
+All email content is generated in `lib/email-service.ts`.
+
+Example production implementation:
+
+```typescript
+import { Resend } from "resend";
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+export async function sendEmail(payload: EmailPayload) {
+  await resend.emails.send({
+    from: "noreply@yourdomain.com",
+    to: payload.to,
+    subject: payload.subject,
+    html: payload.body,
+  });
+}
+```
+
+## AI Configuration
+
+The application uses AI SDK v5 with the Vercel AI Gateway:
+
+- **Default model**: `openai/gpt-5-mini`
+- **Biography generation**: 500 max tokens, temperature 0.7
+- **Automatic retries**: Built into Workflow steps
+- **No API key required**: Uses Vercel AI Gateway by default
+
+To use a different model or provider:
+
+```typescript
+import { generateText } from "ai";
+
+const { text } = await generateText({
+  model: "anthropic/claude-sonnet-4.5", // Or any supported model
+  prompt: "Your prompt here",
+});
+```
+
+## Supabase Integration
+
+### Client Types
+
+The application uses two Supabase client types:
+
+**Server Client** (`lib/supabase/server.ts`)
+
+- Used in Server Components, Server Actions, and Route Handlers
+- Has access to cookies for authentication
+- Always create new instance per request (Fluid compute compatible)
+
+**Browser Client** (`lib/supabase/client.ts`)
+
+- Used in Client Components (with "use client")
+- Persists authentication in browser storage
+- Singleton pattern for browser instances
+
+### Database Operations
+
+All workflow operations in `lib/workflow-store.ts`:
+
+```typescript
+// Create workflow
+const workflow = await createWorkflow(recipientEmail);
+
+// Get workflow with all related data
+const workflow = await getWorkflow(workflowId);
+
+// Update status
+await updateWorkflowStatus(workflowId, "pending_approval");
+
+// Save recipient info
+await saveRecipientInfo(workflowId, recipientInfo);
+
+// Save biography
+await saveBiography(workflowId, biographyText);
+
+// Approve/reject
+await approveBiography(workflowId);
+await rejectBiography(workflowId, reason);
+```
+
+### Schema Migrations
+
+To modify the schema:
+
+1. Create a new file: `scripts/002_your_migration.sql`
+2. Write SQL migration code
+3. Run via Supabase SQL Editor
+4. Never edit executed scripts - always create new ones
+
+## Production Considerations
+
+### 1. Authentication
+
+Add user authentication to secure the application:
+
+```typescript
+// Using Supabase Auth
+import { createClient } from "@/lib/supabase/server";
+
+const supabase = await createClient();
+const {
+  data: { user },
+} = await supabase.auth.getUser();
+
+if (!user) {
+  redirect("/auth/login");
+}
+```
+
+### 2. Row Level Security (RLS)
+
+Enable RLS to protect workflow data:
+
+```sql
+ALTER TABLE workflows ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view their own workflows"
+  ON workflows FOR SELECT
+  USING (auth.email() = initiated_by_email);
+
+CREATE POLICY "Users can update their own workflows"
+  ON workflows FOR UPDATE
+  USING (auth.email() = initiated_by_email);
+```
+
+### 3. Background Jobs
+
+For larger workloads, move biography generation out of the request/response path with a queue or background job. Keep the same flow boundaries: form submission stores recipient data, one generation worker retrieves reference documents and saves the biography, then approval/disapproval routes send the mock or production email.
+
+### 4. Error Handling
+
+Add comprehensive monitoring:
+
+- **Sentry** for error tracking
+- **Vercel Observability** for workflow monitoring
+- **Supabase logging** for database operations
+- **Retry logic** for failed steps
+
+### 5. Security Checklist
+
+- ✅ Enable RLS on all tables
+- ✅ Add authentication
+- ✅ Validate all user inputs
+- ✅ Rate limit API endpoints
+- ✅ Implement CSRF protection
+- ✅ Use environment variables for secrets
+- ✅ Enable Supabase email confirmation
+
+## Troubleshooting
+
+### Database Connection Issues
+
+If you encounter database errors:
+
+1. **Check environment variables**: Ensure all Supabase env vars are set
+2. **Verify migration**: Run `scripts/001_create_workflows_table.sql`
+3. **Check Supabase dashboard**: Verify tables exist
+
+### "Workflow Not Found" Error
+
+If you see "Workflow Not Found":
+
+1. **Verify database**: Check if workflow exists in Supabase dashboard
+2. **Check workflow ID**: Ensure you're using the correct ID
+3. **Review console logs**: Look for database errors
+
+### AI Generation Failures
+
+If biography generation fails:
+
+1. **Check AI SDK**: Verify AI SDK is configured correctly
+2. **Review console logs**: Look for API errors
+3. **Check rate limits**: Ensure you're within API limits
+
+### Performance Optimization
+
+For large-scale deployments:
+
+1. **Add database indexes**: Already included in migration script
+2. **Implement caching**: Use Vercel KV or Redis for frequently accessed data
+3. **Optimize queries**: Use Supabase's query optimization tools
+4. **Enable connection pooling**: Already configured via `POSTGRES_URL`
+
+## Development Tips
+
+### Viewing Database Content
+
+In Supabase dashboard:
+
+```sql
+-- View all workflows
+SELECT * FROM workflows ORDER BY created_at DESC;
+
+-- View workflow with all related data
+SELECT
+  w.*,
+  r.full_name as recipient_name,
+  b.biography_text
+FROM workflows w
+LEFT JOIN workflow_recipients r ON r.workflow_id = w.id
+LEFT JOIN workflow_biographies b ON b.workflow_id = w.id;
+```
+
+### Testing the Complete Flow
+
+1. Create workflow from home page
+2. Copy workflow ID from console or alert
+3. Navigate to `/form/{workflow-id}`
+4. Submit form with test data
+5. Return to home page
+6. Wait for AI generation to complete
+7. Click "Review Biography"
+8. Approve or disapprove
+
+### Resetting Data
+
+To clear all workflows:
+
+```sql
+-- Cascade delete removes related records
+DELETE FROM workflows;
+```
+
+## License
+
+MIT
