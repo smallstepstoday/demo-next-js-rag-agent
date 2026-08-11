@@ -60,17 +60,21 @@ lib/
 ├── workflow-store.ts # Supabase-backed state management
 ├── email-service.ts # Email sending (simulated)
 └── supabase/
-├── client.ts # Browser Supabase client
-└── server.ts # Server Supabase client
+└── server.ts # Server-only Supabase client (service_role); there is no browser client
 
 scripts/
 ├── 001_create_workflows_table.sql # Database schema setup
-└── 002_move_tables_to_rag_demo_schema.sql # Moves tables into the rag_demo schema
+├── 002_move_tables_to_rag_demo_schema.sql # Moves tables into the rag_demo schema
+└── 003_secure_rag_demo_schema.sql # Grants service_role access and enables RLS
 \`\`\`
 
 ### Database Schema
 
-The application uses four Supabase tables, all in the `rag_demo` schema:
+The application uses four Supabase tables, all in the `rag_demo` schema. RLS is
+enabled on all four with no policies for `anon`/`authenticated` — only the
+server-side client (using `SUPABASE_SECRET_KEY`, which authenticates as
+`service_role` and bypasses RLS) can read or write them. There is no
+client-side Supabase access anywhere in this app.
 
 **workflows** - Main workflow state and metadata
 
@@ -144,6 +148,7 @@ npm install
 In Supabase dashboard, use the Scripts runner to execute, in order:
 scripts/001_create_workflows_table.sql
 scripts/002_move_tables_to_rag_demo_schema.sql
+scripts/003_secure_rag_demo_schema.sql
 
 # Then add `rag_demo` to Project Settings > Data API > Exposed schemas
 
@@ -162,8 +167,7 @@ The following environment variables are required:
 ```env
 # Supabase Configuration
 NEXT_PUBLIC_SUPABASE_URL=your-project-url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_SECRET_KEY=your-secret-key
 
 # PostgreSQL Direct Connection (auto-configured)
 POSTGRES_URL=your-postgres-url
@@ -171,6 +175,12 @@ POSTGRES_URL=your-postgres-url
 # Application Configuration
 NEXT_PUBLIC_APP_URL=http://localhost:3000  # Or your deployment URL
 ```
+
+`SUPABASE_SECRET_KEY` is the newer-format secret key (Project Settings > API
+Keys > Secret keys), not the legacy `SUPABASE_SERVICE_ROLE_KEY` JWT. It
+authenticates as `service_role` and is required — RLS on `rag_demo` denies
+everything else. There's no anon/publishable key in this app; nothing reads
+Supabase from the browser.
 
 ## Usage
 
@@ -180,7 +190,8 @@ Before first use, run the database migrations in order:
 
 1. Run `scripts/001_create_workflows_table.sql` — creates all tables with proper indexes and triggers (in `public`)
 2. Run `scripts/002_move_tables_to_rag_demo_schema.sql` — moves those tables into a dedicated `rag_demo` schema
-3. In the Supabase dashboard, add `rag_demo` to the exposed schemas (Project Settings > Data API > Exposed schemas) so PostgREST can serve it
+3. Run `scripts/003_secure_rag_demo_schema.sql` — grants `service_role` access and enables RLS so the tables aren't publicly readable/writable
+4. In the Supabase dashboard, add `rag_demo` to the exposed schemas (Project Settings > Data API > Exposed schemas) so PostgREST can serve it
 
 ### 2. Create a New Workflow
 
@@ -275,19 +286,19 @@ const { text } = await generateText({
 
 ### Client Types
 
-The application uses two Supabase client types:
+The application uses a single Supabase client type:
 
 **Server Client** (`lib/supabase/server.ts`)
 
 - Used in Server Components, Server Actions, and Route Handlers
-- Has access to cookies for authentication
+- Authenticates as `service_role` via `SUPABASE_SECRET_KEY`, bypassing RLS
 - Always create new instance per request (Fluid compute compatible)
 
-**Browser Client** (`lib/supabase/client.ts`)
-
-- Used in Client Components (with "use client")
-- Persists authentication in browser storage
-- Singleton pattern for browser instances
+There is no browser client. Client Components never talk to Supabase
+directly — they call the `app/api/workflows/*` route handlers, which use the
+server client above. `rag_demo` tables have RLS enabled with no
+anon/authenticated policies, so a direct browser client would have no access
+anyway.
 
 ### Database Operations
 
