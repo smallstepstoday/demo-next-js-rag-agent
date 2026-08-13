@@ -12,7 +12,13 @@ type SupabaseClient = Awaited<ReturnType<typeof createClient>>;
 export const RETRIEVAL_COMPILER_VERSION = "retrieval-v1";
 export const PROMPT_TEMPLATE_VERSION = "prompt-v1";
 export const MODEL_NAME = "openai/gpt-5-mini";
-const MODEL_PARAMS = { maxOutputTokens: 500, temperature: 0.7 } as const;
+// gpt-5-mini is a reasoning model: maxOutputTokens covers hidden reasoning
+// tokens *and* visible text, not just the biography. 500 was already tight
+// enough to truncate output mid-sentence; a later `ai` SDK bump increased
+// this model's reasoning-token usage for the same prompt and pushed real
+// generations to zero visible text (reasoning consumed the entire budget).
+// 2000 leaves headroom for both.
+const MODEL_PARAMS = { maxOutputTokens: 2000, temperature: 0.7 } as const;
 
 export type BioReferenceDocument = {
   title: string;
