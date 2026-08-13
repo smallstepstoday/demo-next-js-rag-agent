@@ -30,7 +30,7 @@ This application implements a complete 9-step workflow for generating and managi
 
 ### Project Structure
 
-\`\`\`
+```
 app/
 ├── page.tsx # User landing page (Steps 1-2, 6)
 ├── form/[workflowId]/
@@ -68,7 +68,7 @@ scripts/
 ├── 002_move_tables_to_rag_demo_schema.sql # Moves tables into the rag_demo schema
 ├── 003_secure_rag_demo_schema.sql # Grants service_role access and enables RLS
 └── 004_add_generation_artifacts_table.sql # Adds workflow_generation_artifacts (compiled-input artifact storage)
-\`\`\`
+```
 
 ### Database Schema
 
@@ -151,7 +151,7 @@ The DurableAgent-oriented workflow definition in `app/workflows/biography-workfl
 
 ### Installation
 
-\`\`\`bash
+```bash
 
 # Install dependencies
 
@@ -169,7 +169,6 @@ scripts/004_add_generation_artifacts_table.sql
 
 # Run development server
 
-```
 npm run dev
 ```
 
