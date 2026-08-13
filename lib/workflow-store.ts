@@ -5,6 +5,7 @@ import type {
   RecipientInfo,
   BiographyData,
 } from "./workflow-types";
+import type { CompiledInput } from "./biography-generation";
 
 /**
  * Workflow Store - Supabase Implementation
@@ -336,6 +337,57 @@ export async function saveBiography(workflowId: string, biographyText: string) {
   }
 
   console.log("Biography saved successfully");
+}
+
+/**
+ * Persists the compiled-input artifact for a generation run: the retrieval/
+ * prompt/model versions, the retrieved references, and the exact prompt
+ * text, fingerprinted so a later regression can be traced to a specific
+ * compiler or template version instead of "the model got worse."
+ *
+ * https://cataluma.com/blog/llm-eval-shipping-workflows — "Recommendation: create a compiled-input artifact boundary"
+ *
+ * Best-effort: failures here are logged but never thrown, since this is an
+ * audit/debugging trail, not part of the golden path — a missing artifact
+ * table (e.g. before scripts/004 has been run) must not block generation.
+ *
+ * @param workflowId - Associated workflow ID
+ * @param artifact - Compiled-input artifact returned by generateBiography
+ */
+export async function saveGenerationArtifact(
+  workflowId: string,
+  artifact: CompiledInput,
+) {
+  const supabase = await createServerClient();
+
+  console.log("Saving generation artifact for workflow:", workflowId);
+
+  const { error } = await supabase.from("workflow_generation_artifacts").insert({
+    id: nanoid(),
+    workflow_id: workflowId,
+    compiler_version: artifact.compilerVersion,
+    prompt_version: artifact.promptVersion,
+    model_name: artifact.modelName,
+    model_params: artifact.modelParams,
+    compiled_input: {
+      recipientInput: artifact.recipientInput,
+      references: artifact.references,
+      prompt: artifact.prompt,
+    },
+    fingerprint: artifact.fingerprint,
+  });
+
+  if (error) {
+    console.error("Error saving generation artifact:", error);
+    return;
+  }
+
+  console.log(
+    "Generation artifact saved:",
+    workflowId,
+    "fingerprint:",
+    artifact.fingerprint,
+  );
 }
 
 /**

@@ -1,8 +1,18 @@
 import { generateText } from "ai";
+import { createHash } from "node:crypto";
 import type { RecipientInfo } from "./workflow-types";
 import type { createClient } from "./supabase/server";
 
 type SupabaseClient = Awaited<ReturnType<typeof createClient>>;
+
+// Versions for the retrieval/packing compiler and the prompt template.
+// Bump these when either changes so a regression can be attributed to a
+// specific compiler or template revision instead of "the model got worse."
+// https://cataluma.com/blog/llm-eval-shipping-workflows — "Version the full input contract"
+export const RETRIEVAL_COMPILER_VERSION = "retrieval-v1";
+export const PROMPT_TEMPLATE_VERSION = "prompt-v1";
+export const MODEL_NAME = "openai/gpt-5-mini";
+const MODEL_PARAMS = { maxOutputTokens: 500, temperature: 0.7 } as const;
 
 export type BioReferenceDocument = {
   title: string;
@@ -23,7 +33,75 @@ export type BiographyGenerationResult = {
   text: string;
   prompt: string;
   references: BioReferenceDocument[];
+  compiledInput: CompiledInput;
 };
+
+// The compiled-input artifact: exactly what the model will consume after
+// retrieval, ranking, and templating, plus the versions that produced it.
+// This is the replay boundary — persisting it lets a regression be traced
+// to "the compiler produced different input" versus "the model behaved
+// differently on the same input."
+// https://cataluma.com/blog/llm-eval-shipping-workflows — "Recommendation: create a compiled-input artifact boundary"
+export type CompiledInput = {
+  compilerVersion: string;
+  promptVersion: string;
+  modelName: string;
+  modelParams: typeof MODEL_PARAMS;
+  recipientInput: BiographyGenerationInput;
+  references: BioReferenceDocument[];
+  prompt: string;
+  fingerprint: string;
+};
+
+// Deterministic stringify with sorted object keys, mirroring the
+// `json.dumps(..., sort_keys=True)` fingerprinting approach in
+// https://cataluma.com/blog/llm-eval-shipping-workflows, so key-order
+// differences upstream never change the fingerprint.
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+    return `{${entries
+      .map(([key, val]) => `${JSON.stringify(key)}:${stableStringify(val)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function buildCompiledInput(
+  input: BiographyGenerationInput,
+  references: BioReferenceDocument[],
+): CompiledInput {
+  const prompt = buildBiographyPrompt(input, references);
+  const fingerprint = createHash("sha256")
+    .update(
+      stableStringify({
+        compilerVersion: RETRIEVAL_COMPILER_VERSION,
+        promptVersion: PROMPT_TEMPLATE_VERSION,
+        modelName: MODEL_NAME,
+        modelParams: MODEL_PARAMS,
+        recipientInput: input,
+        references,
+        prompt,
+      }),
+    )
+    .digest("hex");
+
+  return {
+    compilerVersion: RETRIEVAL_COMPILER_VERSION,
+    promptVersion: PROMPT_TEMPLATE_VERSION,
+    modelName: MODEL_NAME,
+    modelParams: MODEL_PARAMS,
+    recipientInput: input,
+    references,
+    prompt,
+    fingerprint,
+  };
+}
 
 function normalizeSearchTerm(value: unknown) {
   return String(value || "")
@@ -85,7 +163,13 @@ export async function retrieveBiographyReferences(
       document,
       score: scoreReferenceDocument(document, searchTerms),
     }))
-    .sort((a, b) => b.score - a.score);
+    // Tie-break by title: Postgres doesn't guarantee row order without an
+    // ORDER BY, so two equal-score documents could otherwise flip position
+    // between runs and silently change which references reach the prompt.
+    // https://cataluma.com/blog/llm-eval-shipping-workflows — "Add invariance and sensitivity suites" (row_order_shuffle)
+    .sort(
+      (a, b) => b.score - a.score || a.document.title.localeCompare(b.document.title),
+    );
 
   const matches = rankedReferences.filter(({ score }) => score > 0).slice(0, 3);
 
@@ -129,23 +213,28 @@ export async function generateBiography(
   input: BiographyGenerationInput,
 ) {
   const references = await retrieveBiographyReferences(supabase, input);
-  const prompt = buildBiographyPrompt(input, references);
+  const compiledInput = buildCompiledInput(input, references);
 
   console.log(
     "Biography generation - Retrieved biography references:",
     references.map((reference) => reference.title),
   );
+  console.log(
+    "Biography generation - Compiled input fingerprint:",
+    compiledInput.fingerprint,
+  );
 
   const { text } = await generateText({
-    model: "openai/gpt-3.5-turbo",
-    prompt,
-    maxOutputTokens: 500,
-    temperature: 0.7,
+    model: compiledInput.modelName,
+    prompt: compiledInput.prompt,
+    maxOutputTokens: compiledInput.modelParams.maxOutputTokens,
+    temperature: compiledInput.modelParams.temperature,
   });
 
   return {
     text,
-    prompt,
+    prompt: compiledInput.prompt,
     references,
+    compiledInput,
   } satisfies BiographyGenerationResult;
 }

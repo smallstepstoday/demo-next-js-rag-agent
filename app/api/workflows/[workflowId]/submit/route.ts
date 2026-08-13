@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { generateBiography } from "@/lib/biography-generation";
+import { saveGenerationArtifact } from "@/lib/workflow-store";
 import { NextResponse } from "next/server";
 
 // STEP 3 API: Handle recipient form submission and trigger AI biography generation
@@ -85,16 +86,25 @@ export async function POST(
     // STEP 5: Retrieve role-specific reference material, then generate biography using AI.
     console.log("Submit route - Generating biography with AI");
 
-    const { text: biographyText } = await generateBiography(supabase, {
-      name: body.name,
-      occupation: body.occupation,
-      yearsOfExperience: body.yearsOfExperience,
-      skills: body.skills || [],
-      achievements: body.achievements,
-      interests: body.interests,
-    });
+    const { text: biographyText, compiledInput } = await generateBiography(
+      supabase,
+      {
+        name: body.name,
+        occupation: body.occupation,
+        yearsOfExperience: body.yearsOfExperience,
+        skills: body.skills || [],
+        achievements: body.achievements,
+        interests: body.interests,
+      },
+    );
 
     console.log("Submit route - Biography generated successfully");
+
+    // Persist the compiled-input artifact (versions, retrieved references,
+    // prompt, fingerprint) so this run is replayable and regressions can be
+    // localized to the compiler vs. the model. Best-effort — see
+    // lib/workflow-store.ts saveGenerationArtifact.
+    await saveGenerationArtifact(workflowId, compiledInput);
 
     // Save the generated biography to the database
     const { error: saveBiographyError } = await supabase

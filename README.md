@@ -55,7 +55,8 @@ components/
 └── ui/ # shadcn/ui components
 
 lib/
-├── biography-generation.ts # Shared RAG retrieval, prompt construction, and generation
+├── biography-generation.ts # RAG retrieval, prompt construction, compiled-input artifact, and generation
+├── biography-generation.test.ts # Eval harness: invariance/sensitivity suites for retrieval + artifact fingerprinting
 ├── workflow-types.ts # TypeScript types for workflow
 ├── workflow-store.ts # Supabase-backed state management
 ├── email-service.ts # Email sending (simulated)
@@ -65,13 +66,14 @@ lib/
 scripts/
 ├── 001_create_workflows_table.sql # Database schema setup
 ├── 002_move_tables_to_rag_demo_schema.sql # Moves tables into the rag_demo schema
-└── 003_secure_rag_demo_schema.sql # Grants service_role access and enables RLS
+├── 003_secure_rag_demo_schema.sql # Grants service_role access and enables RLS
+└── 004_add_generation_artifacts_table.sql # Adds workflow_generation_artifacts (compiled-input artifact storage)
 \`\`\`
 
 ### Database Schema
 
-The application uses four Supabase tables, all in the `rag_demo` schema. RLS is
-enabled on all four with no policies for `anon`/`authenticated` — only the
+The application uses five Supabase tables, all in the `rag_demo` schema. RLS is
+enabled on all five with no policies for `anon`/`authenticated` — only the
 server-side client (using `SUPABASE_SECRET_KEY`, which authenticates as
 `service_role` and bypasses RLS) can read or write them. There is no
 client-side Supabase access anywhere in this app.
@@ -107,6 +109,18 @@ client-side Supabase access anywhere in this app.
 - `category` (TEXT): Role or topic category
 - `content` (TEXT): Writing guidance retrieved during generation
 - `created_at` (TIMESTAMP): Timestamp
+
+**workflow_generation_artifacts** - Compiled-input artifacts for each generation run
+
+- `id` (TEXT): Stable artifact identifier
+- `workflow_id` (TEXT): References workflows table
+- `compiler_version`, `prompt_version` (TEXT): Retrieval/packing and prompt template versions
+- `model_name` (TEXT), `model_params` (JSONB): Model and inference parameters used
+- `compiled_input` (JSONB): Recipient input, retrieved references, and final prompt text
+- `fingerprint` (TEXT): SHA-256 hash of the compiled input, for replay/diffing
+- `created_at` (TIMESTAMP): Timestamp
+
+See [Eval Workflow and the Compiled-Input Artifact](#eval-workflow-and-the-compiled-input-artifact) below.
 
 ### Workflow State Management
 
@@ -149,6 +163,7 @@ In Supabase dashboard, use the Scripts runner to execute, in order:
 scripts/001_create_workflows_table.sql
 scripts/002_move_tables_to_rag_demo_schema.sql
 scripts/003_secure_rag_demo_schema.sql
+scripts/004_add_generation_artifacts_table.sql
 
 # Then add `rag_demo` to Project Settings > Data API > Exposed schemas
 
@@ -191,7 +206,8 @@ Before first use, run the database migrations in order:
 1. Run `scripts/001_create_workflows_table.sql` — creates all tables with proper indexes and triggers (in `public`)
 2. Run `scripts/002_move_tables_to_rag_demo_schema.sql` — moves those tables into a dedicated `rag_demo` schema
 3. Run `scripts/003_secure_rag_demo_schema.sql` — grants `service_role` access and enables RLS so the tables aren't publicly readable/writable
-4. In the Supabase dashboard, add `rag_demo` to the exposed schemas (Project Settings > Data API > Exposed schemas) so PostgREST can serve it
+4. Run `scripts/004_add_generation_artifacts_table.sql` — adds `workflow_generation_artifacts` for the compiled-input artifact (see [Eval Workflow and the Compiled-Input Artifact](#eval-workflow-and-the-compiled-input-artifact))
+5. In the Supabase dashboard, add `rag_demo` to the exposed schemas (Project Settings > Data API > Exposed schemas) so PostgREST can serve it
 
 ### 2. Create a New Workflow
 
@@ -225,6 +241,49 @@ This demo implements a lightweight RAG path without vector search. The `bio_refe
 The submit API route and DurableAgent workflow step both use `lib/biography-generation.ts` for retrieval, prompt construction, and AI generation. If you need to verify retrieval during a run, watch the server logs for `Biography generation - Retrieved biography references:` followed by the selected document titles.
 
 For a production-grade RAG system, this could be extended with embeddings, Supabase `pgvector`, document ingestion, and similarity search.
+
+## Eval Workflow and the Compiled-Input Artifact
+
+This demo implements two ideas from
+[Treat eval as a release workflow, not a benchmark report](https://cataluma.com/blog/llm-eval-shipping-workflows):
+
+**Compiled-input artifact boundary** ("Recommendation: create a compiled-input
+artifact boundary"). `buildCompiledInput` in `lib/biography-generation.ts`
+compiles the retrieved references and prompt into a single versioned,
+fingerprinted object before it reaches the model. `generateBiography`
+returns that artifact, and `saveGenerationArtifact` in `lib/workflow-store.ts`
+persists it to `workflow_generation_artifacts` (schema:
+`scripts/004_add_generation_artifacts_table.sql`). This is the replay
+boundary the article describes: if a biography regresses, you can diff the
+stored `compiled_input` to tell whether retrieval/packing changed or the
+model behaved differently on the same input.
+
+**Versioning the full input contract** ("Version the full input contract").
+`RETRIEVAL_COMPILER_VERSION`, `PROMPT_TEMPLATE_VERSION`, and `MODEL_NAME` are
+explicit constants in `lib/biography-generation.ts` rather than inline
+literals, so a change to ranking, packing, the prompt template, or the model
+is a version bump that shows up in every stored artifact.
+
+**Invariance and sensitivity suites** ("Add invariance and sensitivity
+suites"). `lib/biography-generation.test.ts` is a small eval harness over the
+retrieval/ranking compiler:
+
+- *Invariance:* reordering the source rows returned from Supabase must not
+  change which references are selected or their relative order. Postgres
+  doesn't guarantee row order without `ORDER BY`, so this catches a real
+  `row_order_shuffle` class of bug. Earlier versions of `retrieveBiographyReferences`
+  had no tie-break on equal-scored documents, so a row-order change could
+  silently reorder a reference the model saw, or under `slice(0, 3)`, drop one.
+- *Sensitivity:* adding a document that matches the query must surface it,
+  and removing the only match must trigger the general-guidance fallback
+  rather than an empty context block.
+
+Run the suite with:
+
+```bash
+pnpm test        # single run
+pnpm test:watch  # watch mode
+```
 
 ### 5. Review and Approve/Disapprove
 
