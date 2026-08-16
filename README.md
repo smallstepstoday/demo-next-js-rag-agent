@@ -508,6 +508,18 @@ monthly bill, and requests are rejected with HTTP 402 once it trips. That is
 dashboard configuration, so it is not in this repository and has to be set on
 the project directly.
 
+The budget only meters this app while the deployment authenticates by OIDC.
+Project budgets count OIDC tokens from that project's deployments and never
+count API keys, so setting `AI_GATEWAY_API_KEY` in the project environment
+would silently take this app out of scope of its own budget.
+
+When the budget does trip, `/api/workflows/[workflowId]/submit` resets the
+workflow to `pending_form` and returns 503 with a `Retry-After` counting down
+to midnight UTC. The form link reopens and the visitor is told the demo has hit
+its daily limit. Without that reset the workflow would sit at "Generating
+Biography" with no way forward, which is the failure a spend cap is most likely
+to produce and the one that looks least like a working demo.
+
 ## Production Considerations
 
 ### 1. Authentication

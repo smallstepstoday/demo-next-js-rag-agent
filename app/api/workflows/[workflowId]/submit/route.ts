@@ -1,8 +1,16 @@
 import { createClient } from "@/lib/supabase/server";
 import { generateBiography } from "@/lib/biography-generation";
-import { getOwnedWorkflowRow, saveGenerationArtifact } from "@/lib/workflow-store";
+import {
+  getOwnedWorkflowRow,
+  resetWorkflowAfterFailedGeneration,
+  saveGenerationArtifact,
+} from "@/lib/workflow-store";
 import { errorDetails } from "@/lib/api-errors";
 import { requireDemoSession } from "@/lib/demo-session-server";
+import {
+  isGatewayBudgetError,
+  secondsUntilBudgetReset,
+} from "@/lib/generation-errors";
 import { RATE_LIMITS, consumeRateLimit } from "@/lib/rate-limit";
 import { parseJsonBody, submitWorkflowSchema } from "@/lib/validation";
 import { NextResponse } from "next/server";
@@ -153,17 +161,67 @@ export async function POST(
     // STEP 5: Retrieve role-specific reference material, then generate biography using AI.
     console.log("Submit route - Generating biography with AI");
 
-    const { text: biographyText, compiledInput } = await generateBiography(
-      supabase,
-      {
-        name: body.name,
-        occupation: body.occupation,
-        yearsOfExperience: body.yearsOfExperience,
-        skills: body.skills || [],
-        achievements: body.achievements,
-        interests: body.interests,
-      },
-    );
+    // Everything above this point has already been written: the recipient row
+    // exists and the status says form_submitted. If generation throws and we
+    // simply propagate, the workflow is stranded there — the card reads
+    // "Generating Biography" forever and the form link will not reopen. So any
+    // failure here resets the status first, which reopens the form for a
+    // retry, and the visitor is told which kind of failure it was.
+    let biographyText: string;
+    let compiledInput: Awaited<
+      ReturnType<typeof generateBiography>
+    >["compiledInput"];
+
+    try {
+      ({ text: biographyText, compiledInput } = await generateBiography(
+        supabase,
+        {
+          name: body.name,
+          occupation: body.occupation,
+          yearsOfExperience: body.yearsOfExperience,
+          skills: body.skills || [],
+          achievements: body.achievements,
+          interests: body.interests,
+        },
+      ));
+    } catch (generationError) {
+      await resetWorkflowAfterFailedGeneration(workflowId, sessionId);
+
+      // The spend budget doing its job is an expected state for a public
+      // demo, not a fault. Saying so is more useful than a generic error, and
+      // it stops the demo looking broken when it is working as designed.
+      if (isGatewayBudgetError(generationError)) {
+        const retryAfter = secondsUntilBudgetReset();
+
+        console.warn(
+          "Submit route - AI Gateway spend budget reached; generation refused.",
+          { workflowId, retryAfterSeconds: retryAfter },
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              "This demo has reached its daily generation limit. The limit resets at midnight UTC — please try again then.",
+            budgetExhausted: true,
+          },
+          {
+            status: 503,
+            headers: { "Retry-After": String(retryAfter) },
+          },
+        );
+      }
+
+      console.error("Submit route - Biography generation failed:", generationError);
+
+      return NextResponse.json(
+        {
+          error:
+            "Biography generation failed. Your form has been reopened, so you can submit it again.",
+          details: errorDetails(generationError),
+        },
+        { status: 502 },
+      );
+    }
 
     console.log("Submit route - Biography generated successfully");
 

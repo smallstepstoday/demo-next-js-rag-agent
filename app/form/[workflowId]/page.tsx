@@ -84,8 +84,14 @@ export default async function FormPage({ params }: PageProps) {
     )
   }
 
-  // Show message if form already submitted
-  if (workflow.workflow_recipients) {
+  // Show message if the form has already been submitted.
+  //
+  // Gated on status rather than on the presence of a recipient row. A failed
+  // generation resets the status to pending_form but deliberately keeps the
+  // submitted row, so checking for the row would leave the form permanently
+  // closed on exactly the workflows that need to be resubmitted. Every status
+  // past pending_form means a submission is in flight or complete.
+  if (workflow.status !== "pending_form") {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background px-4">
         <Card className="w-full max-w-md">

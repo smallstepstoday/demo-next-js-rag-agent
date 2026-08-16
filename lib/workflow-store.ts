@@ -536,6 +536,51 @@ export async function deleteWorkflow(
 }
 
 /**
+ * Returns a workflow to the pre-submission state after generation failed.
+ *
+ * Without this, a failed generation leaves the workflow at `form_submitted`
+ * with a recipient row and no biography: the dashboard card reads "Generating
+ * Biography" indefinitely and the form link refuses to reopen, so the only way
+ * out is deleting the workflow. That is a bad outcome for a transient failure,
+ * and the gateway spend budget makes it a routine one.
+ *
+ * The recipient's submitted row is kept rather than deleted. It costs nothing,
+ * and throwing away what someone typed because the model call failed is the
+ * wrong trade. `/form/[workflowId]` gates on status, so resetting the status
+ * is what reopens the form; the submit route upserts, so a retry overwrites
+ * cleanly.
+ *
+ * Best-effort: this runs on an error path, and a failure here must not replace
+ * the original error with a less useful one.
+ *
+ * @param workflowId - Workflow to reset
+ * @param sessionId - Visitor session that must own it
+ */
+export async function resetWorkflowAfterFailedGeneration(
+  workflowId: string,
+  sessionId: string,
+) {
+  const supabase = await createServerClient();
+
+  const { error } = await supabase
+    .from("workflows")
+    .update({ status: "pending_form" })
+    .eq("id", workflowId)
+    .eq("session_id", sessionId);
+
+  if (error) {
+    console.error(
+      "Error resetting workflow after failed generation:",
+      workflowId,
+      error,
+    );
+    return;
+  }
+
+  console.log("Workflow reset to pending_form after failed generation:", workflowId);
+}
+
+/**
  * Counts the workflows a session has accumulated.
  *
  * Backs the durable half of the rate limiting. The in-memory window in
