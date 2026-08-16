@@ -1,10 +1,32 @@
 import { createClient } from "@/lib/supabase/server";
 import { generateBiography } from "@/lib/biography-generation";
-import { saveGenerationArtifact } from "@/lib/workflow-store";
+import { getOwnedWorkflowRow, saveGenerationArtifact } from "@/lib/workflow-store";
+import { errorDetails } from "@/lib/api-errors";
+import { requireDemoSession } from "@/lib/demo-session-server";
+import { RATE_LIMITS, consumeRateLimit } from "@/lib/rate-limit";
+import { parseJsonBody, submitWorkflowSchema } from "@/lib/validation";
 import { NextResponse } from "next/server";
 
 // STEP 3 API: Handle recipient form submission and trigger AI biography generation
 // This endpoint is called when the recipient completes and submits their biographical information form
+//
+// THIS IS THE ROUTE THAT SPENDS MONEY. Every successful call is one
+// generateText call against the model. It is guarded four ways:
+//
+//   1. Demo session ownership — only the session that created the workflow
+//      can submit against it.
+//   2. zod validation with hard length caps — bounds the size of the prompt
+//      the caller can construct (see lib/validation.ts).
+//   3. A per-session burst window (see lib/rate-limit.ts).
+//   4. One generation per workflow — a workflow that already has a biography
+//      cannot be resubmitted, so the create cap is also a generation cap.
+//
+// On the demo's single-browser story: emails are simulated through a console
+// log, so the "recipient" opening the form link is always the same visitor who
+// created the workflow. Gating submit on the creating session is therefore
+// free here. A production version that mails real links would instead give the
+// recipient a signed, single-use link token and verify that, rather than
+// requiring them to share the operator's session.
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ workflowId: string }> },
@@ -12,26 +34,70 @@ export async function POST(
   try {
     const { workflowId } = await params;
 
+    const session = await requireDemoSession();
+    if ("response" in session) {
+      return session.response;
+    }
+    const { sessionId } = session;
+
+    const burst = consumeRateLimit(
+      `submit:${sessionId}`,
+      RATE_LIMITS.submit.limit,
+      RATE_LIMITS.submit.windowMs,
+    );
+
+    if (!burst.allowed) {
+      return NextResponse.json(
+        { error: "Too many biography generations. Try again later." },
+        {
+          status: 429,
+          headers: { "Retry-After": String(burst.retryAfterSeconds) },
+        },
+      );
+    }
+
     const supabase = await createClient();
 
-    // Parse the incoming form data from the recipient
-    const body = await request.json();
+    // Parse and validate the incoming form data. Length caps here are what
+    // bound the prompt this request can build.
+    const parsed = await parseJsonBody(request, submitWorkflowSchema);
+    if ("response" in parsed) {
+      return parsed.response;
+    }
+    const body = parsed.data;
 
     console.log("Submit route - Workflow ID:", workflowId);
-    console.log("Submit route - Received data:", body);
 
-    // Verify the workflow exists in the database
-    const { data, error } = await supabase
-      .from("workflows")
-      .select("*")
-      .eq("id", workflowId)
-      .single();
+    // Verify the workflow exists AND belongs to this session. A workflow
+    // owned by someone else is reported as not found, so this route cannot be
+    // used to probe which workflow ids exist.
+    const workflow = await getOwnedWorkflowRow(workflowId, sessionId);
 
-    if (error || !data) {
-      console.error("Submit route - Workflow not found:", error);
+    if (!workflow) {
+      console.error("Submit route - Workflow not found for this session");
       return NextResponse.json(
         { error: "Workflow not found" },
         { status: 404 },
+      );
+    }
+
+    // One generation per workflow. Without this, a single workflow id could be
+    // resubmitted indefinitely and the per-session workflow cap would bound
+    // nothing. Checked before any write so a repeat submission costs one
+    // SELECT rather than a model call.
+    const { data: existingBiography } = await supabase
+      .from("workflow_biographies")
+      .select("workflow_id")
+      .eq("workflow_id", workflowId)
+      .maybeSingle();
+
+    if (existingBiography) {
+      return NextResponse.json(
+        {
+          error:
+            "This workflow already has a generated biography. Create a new workflow to generate another.",
+        },
+        { status: 409 },
       );
     }
 
@@ -48,7 +114,7 @@ export async function POST(
       bio_context: `${body.achievements || ""}\nYears of Experience: ${body.yearsOfExperience || 0}`,
     };
 
-    console.log("Submit route - Saving recipient info:", recipientDbRow);
+    console.log("Submit route - Saving recipient info for:", workflowId);
 
     // Save or update the recipient information in the database
     // Using upsert to handle both new and existing records
@@ -64,7 +130,7 @@ export async function POST(
       return NextResponse.json(
         {
           error: "Failed to save recipient information",
-          details: recipientError.message,
+          details: errorDetails(recipientError),
         },
         { status: 500 },
       );
@@ -74,7 +140,8 @@ export async function POST(
     const { error: statusError } = await supabase
       .from("workflows")
       .update({ status: "form_submitted" })
-      .eq("id", workflowId);
+      .eq("id", workflowId)
+      .eq("session_id", sessionId);
 
     if (statusError) {
       console.error(
@@ -126,7 +193,7 @@ export async function POST(
       return NextResponse.json(
         {
           error: "Failed to save biography",
-          details: saveBiographyError.message,
+          details: errorDetails(saveBiographyError),
         },
         { status: 500 },
       );
@@ -138,7 +205,8 @@ export async function POST(
     const { error: updateStatusError } = await supabase
       .from("workflows")
       .update({ status: "pending_review" })
-      .eq("id", workflowId);
+      .eq("id", workflowId)
+      .eq("session_id", sessionId);
 
     if (updateStatusError) {
       console.error(
@@ -148,7 +216,7 @@ export async function POST(
       return NextResponse.json(
         {
           error: "Failed to update workflow status",
-          details: updateStatusError.message,
+          details: errorDetails(updateStatusError),
         },
         { status: 500 },
       );
@@ -162,11 +230,11 @@ export async function POST(
       success: true,
     });
   } catch (e) {
-    // Catch any unexpected errors and return a detailed error response
+    // Catch any unexpected errors. Logged in full; disclosed to the caller
+    // only outside production.
     console.error("Submit route - Unexpected error:", e);
-    const errorMessage = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json(
-      { error: "Failed to process submission", details: errorMessage },
+      { error: "Failed to process submission", details: errorDetails(e) },
       { status: 500 },
     );
   }
