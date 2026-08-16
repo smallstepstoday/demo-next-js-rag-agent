@@ -29,20 +29,21 @@ import {
 export async function proxy(request: NextRequest) {
   const existing = request.cookies.get(DEMO_SESSION_COOKIE)?.value;
 
-  let sessionId = await readDemoSessionId(existing);
+  let signedSession = (await readDemoSessionId(existing)) ? existing! : null;
   let cookieToIssue: string | null = null;
 
-  if (!sessionId) {
+  if (!signedSession) {
     const minted = await createDemoSession();
-    sessionId = minted.id;
+    signedSession = minted.value;
     cookieToIssue = minted.value;
   }
 
-  // Strip any client-supplied copy before setting our own, so the header is
-  // only ever what this proxy put there.
+  // Strip any client-supplied copy before setting our own. The value carries
+  // its signature, so a handler reached without passing through here still
+  // verifies rather than trusts it.
   const requestHeaders = new Headers(request.headers);
   requestHeaders.delete(DEMO_SESSION_HEADER);
-  requestHeaders.set(DEMO_SESSION_HEADER, sessionId);
+  requestHeaders.set(DEMO_SESSION_HEADER, signedSession);
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
 

@@ -17,25 +17,30 @@ import {
 /**
  * Resolves the current visitor's session id.
  *
- * Prefers the signed cookie, which this server can verify cryptographically.
- * Falls back to the proxy-set request header, which covers the first
- * request of a session — the one where the cookie is on the response but not
- * yet on the request. The proxy strips any inbound copy of that header
- * before setting its own, so it cannot be supplied by a caller.
+ * Prefers the cookie. Falls back to the proxy-set request header, which covers
+ * the first request of a session — the one where the cookie is on the response
+ * but not yet on the request.
+ *
+ * Both carry the same signed value and both are verified here. The proxy also
+ * strips any inbound copy of the header, but this function does not depend on
+ * that: an unsigned or wrongly signed header is rejected exactly like an
+ * unsigned cookie, so a request that somehow reaches a handler without passing
+ * through the proxy cannot name a session it does not own.
  *
  * @returns The session id, or null when no session could be resolved
  */
 export async function getDemoSessionId(): Promise<string | null> {
   const cookieStore = await cookies();
-  const signed = cookieStore.get(DEMO_SESSION_COOKIE)?.value;
 
-  const fromCookie = await readDemoSessionId(signed);
+  const fromCookie = await readDemoSessionId(
+    cookieStore.get(DEMO_SESSION_COOKIE)?.value,
+  );
   if (fromCookie) {
     return fromCookie;
   }
 
   const headerStore = await headers();
-  return headerStore.get(DEMO_SESSION_HEADER) || null;
+  return readDemoSessionId(headerStore.get(DEMO_SESSION_HEADER));
 }
 
 /**

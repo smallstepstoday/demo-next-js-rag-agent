@@ -480,6 +480,11 @@ biography returns 409, so one workflow id cannot be replayed for repeated
 generations. The burst window lives in instance memory and resets on a cold
 start. The row counts do not.
 
+None of this stops someone who discards their cookie between requests: a fresh
+session gets a fresh allowance. That is the unavoidable shape of rate limiting
+without accounts, and it is why the gateway budget below is the actual ceiling
+rather than a nice-to-have.
+
 ### Prompt handling
 
 Recipient-supplied text sits below an explicit delimiter,
@@ -565,7 +570,9 @@ What the demo already does, described in [Demo security model](#demo-security-mo
 What a production deployment still needs:
 
 - Real authentication, replacing the per-visitor session cookie
-- CSRF protection on the state-changing routes
+- Explicit CSRF tokens on the state-changing routes. The session cookie is
+  `SameSite=Lax`, so a cross-site POST does not carry it, but that is a
+  side effect rather than a defense anyone chose
 - Supabase email confirmation
 - A signed, single-use link token for the recipient, so the form does not depend
   on the operator's session

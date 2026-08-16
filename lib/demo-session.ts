@@ -21,16 +21,17 @@
 export const DEMO_SESSION_COOKIE = "demo_session";
 
 /**
- * Header the proxy writes the resolved session id onto, so a route
- * handler can read the session on the very same request that minted the
- * cookie (the `Set-Cookie` header is not visible to the request that set it).
+ * Header the proxy writes the resolved session onto, so a route handler can
+ * read the session on the very same request that minted the cookie (the
+ * `Set-Cookie` header is not visible to the request that set it).
  *
- * The proxy deletes any inbound copy of this header before setting its
- * own, so a client cannot supply it. Server-side readers verify the cookie
- * signature first and fall back to this header only when there is no valid
- * cookie yet.
+ * It carries the same signed `<id>.<signature>` value as the cookie, and
+ * readers verify it the same way. The proxy also deletes any inbound copy
+ * before setting its own, but the signature is what makes forgery pointless:
+ * a caller who reaches a handler on a path the proxy did not match still
+ * cannot present a session id the server will accept.
  */
-export const DEMO_SESSION_HEADER = "x-demo-session-id";
+export const DEMO_SESSION_HEADER = "x-demo-session";
 
 /**
  * Cookie lifetime, deliberately matched to the 48-hour data expiry window in
