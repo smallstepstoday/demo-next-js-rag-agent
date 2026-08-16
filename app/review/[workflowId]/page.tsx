@@ -1,4 +1,5 @@
 import BiographyReview from "@/components/biography-review";
+import { getDemoSessionId } from "@/lib/demo-session-server";
 import { getWorkflow } from "@/lib/workflow-store";
 import { notFound } from "next/navigation";
 
@@ -11,7 +12,13 @@ import { notFound } from "next/navigation";
  * - Fetches the workflow with biography data from Supabase
  * - Validates the workflow is ready for review
  * - Renders the BiographyReview client component with the data
+ *
+ * Scoped to the visitor's demo session. This page renders model output built
+ * from recipient-supplied text, so a workflow belonging to another visitor is
+ * a 404 rather than a page.
  */
+
+export const dynamic = "force-dynamic";
 
 interface PageProps {
   params: Promise<{ workflowId: string }>;
@@ -21,19 +28,17 @@ export default async function ReviewPage({ params }: PageProps) {
   // Await params to get the workflowId (Next.js 15+ async params)
   const { workflowId } = await params;
 
-  // Fetch the workflow from Supabase with all related data
-  const workflow = await getWorkflow(workflowId);
+  const sessionId = await getDemoSessionId();
+
+  // Fetch the workflow from Supabase with all related data, scoped to session
+  const workflow = sessionId ? await getWorkflow(workflowId, sessionId) : null;
 
   console.log("Review page - Workflow ID:", workflowId);
   console.log("Review page - Workflow found:", !!workflow);
   console.log("Review page - Workflow status:", workflow?.status);
   console.log("Review page - Biography exists:", !!workflow?.biography);
-  console.log(
-    "Review page - Biography content:",
-    workflow?.biography?.description?.substring(0, 100),
-  );
 
-  // Show 404 if workflow doesn't exist
+  // Show 404 if the workflow doesn't exist or isn't this session's
   if (!workflow) {
     notFound();
   }

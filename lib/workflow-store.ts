@@ -18,6 +18,15 @@ import type { CompiledInput } from "./biography-generation";
  * - Server-side functions use createServerClient() for server components and API routes
  * - Client-side functions use createBrowserClient() for client components
  * - All functions include comprehensive error handling and type safety
+ *
+ * SESSION SCOPING:
+ * - Every read and write that a visitor can reach takes a sessionId and
+ *   filters on `workflows.session_id`. The demo has no accounts, so this
+ *   column is the only thing standing between one visitor's workflows and
+ *   another's. See lib/demo-session.ts and scripts/005_add_session_scoping.sql.
+ * - The sessionId parameter is required, not optional. An optional one
+ *   invites a call site that forgets it and silently reads every row, which
+ *   is the exact failure this scoping exists to prevent.
  */
 
 // ============================================================================
@@ -119,9 +128,13 @@ function recipientInfoToDbRow(info: any) {
  * WORKFLOW STEP 1: User initiates the process by providing recipient email
  *
  * @param recipientEmail - Email address of the person who will fill the form
+ * @param sessionId - Visitor session that owns this workflow
  * @returns Newly created workflow ID
  */
-export async function createWorkflow(recipientEmail: string) {
+export async function createWorkflow(
+  recipientEmail: string,
+  sessionId: string,
+) {
   const supabase = await createServerClient();
   const workflowId = nanoid();
 
@@ -132,6 +145,7 @@ export async function createWorkflow(recipientEmail: string) {
       id: workflowId,
       recipient_email: recipientEmail,
       status: "pending_form",
+      session_id: sessionId,
       initiated_by_email: "user@example.com", // TODO: Replace with actual authenticated user
     },
   ]);
@@ -152,11 +166,18 @@ export async function createWorkflow(recipientEmail: string) {
  * - workflow_recipients (form submission data)
  * - workflow_biographies (AI-generated biography)
  *
+ * The session filter is part of the query rather than a check on the result,
+ * so a workflow belonging to another visitor is indistinguishable from one
+ * that does not exist. That keeps the not-found path from confirming which
+ * workflow ids are real.
+ *
  * @param workflowId - Unique workflow identifier
- * @returns Complete workflow state or null if not found
+ * @param sessionId - Visitor session that must own the workflow
+ * @returns Complete workflow state, or null when absent or not owned
  */
 export async function getWorkflow(
   workflowId: string,
+  sessionId: string,
 ): Promise<WorkflowState | null> {
   const supabase = await createServerClient();
 
@@ -172,6 +193,7 @@ export async function getWorkflow(
     `,
     )
     .eq("id", workflowId)
+    .eq("session_id", sessionId)
     .single();
 
   if (error) {
@@ -194,9 +216,14 @@ export async function getWorkflow(
 }
 
 /**
- * Retrieves all workflows ordered by creation date (newest first).
+ * Retrieves the calling session's workflows, newest first.
  *
- * WORKFLOW STEP 6: Display all workflows on user dashboard.
+ * WORKFLOW STEP 6: Display the visitor's workflows on their dashboard.
+ *
+ * This function used to return every row in the table to any caller: every
+ * name, email address, occupation, submitted context, and generated biography
+ * in the system, in one unauthenticated response. The session filter is what
+ * closes that.
  *
  * RETRY LOGIC:
  *   After a Supabase project is restored from a paused state, PostgREST may
@@ -204,9 +231,12 @@ export async function getWorkflow(
  *   This function retries up to MAX_RETRIES times with exponential backoff
  *   (1 s, 2 s, 4 s) so the page loads cleanly once the cache is ready.
  *
- * @returns Array of all workflows with their complete state
+ * @param sessionId - Visitor session whose workflows to return
+ * @returns That session's workflows with their complete state
  */
-export async function getAllWorkflows(): Promise<WorkflowState[]> {
+export async function getAllWorkflows(
+  sessionId: string,
+): Promise<WorkflowState[]> {
   const MAX_RETRIES = 3;
   const supabase = await createServerClient();
 
@@ -220,6 +250,7 @@ export async function getAllWorkflows(): Promise<WorkflowState[]> {
         workflow_biographies(*)
       `,
       )
+      .eq("session_id", sessionId)
       .order("created_at", { ascending: false });
 
     if (!error) {
@@ -457,30 +488,140 @@ export async function rejectBiography(
 }
 
 /**
- * Deletes a workflow and all related data
+ * Deletes a workflow and all related data, if the session owns it.
  *
  * This will cascade delete:
  * - workflow_recipients
  * - workflow_biographies
+ * - workflow_generation_artifacts
+ *
+ * The session filter is in the DELETE statement itself rather than in a
+ * preceding SELECT, so there is no window between the ownership check and the
+ * write. A delete for a workflow the session does not own removes nothing and
+ * reports false.
  *
  * @param workflowId - Workflow to delete
+ * @param sessionId - Visitor session that must own the workflow
+ * @returns Whether a row was actually deleted
  */
-export async function deleteWorkflow(workflowId: string) {
+export async function deleteWorkflow(
+  workflowId: string,
+  sessionId: string,
+): Promise<boolean> {
   const supabase = await createServerClient();
 
   console.log("Deleting workflow:", workflowId);
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("workflows")
     .delete()
-    .eq("id", workflowId);
+    .eq("id", workflowId)
+    .eq("session_id", sessionId)
+    .select("id");
 
   if (error) {
     console.error("Error deleting workflow:", error);
     throw error;
   }
 
-  console.log("Workflow deleted successfully");
+  const deleted = (data || []).length > 0;
+
+  console.log(
+    deleted
+      ? "Workflow deleted successfully"
+      : "Workflow not deleted: no row matched this session",
+  );
+
+  return deleted;
+}
+
+/**
+ * Counts the workflows a session has accumulated.
+ *
+ * Backs the durable half of the rate limiting. The in-memory window in
+ * lib/rate-limit.ts resets on cold start; this does not, because it counts
+ * rows rather than requests.
+ *
+ * @param sessionId - Visitor session to count
+ * @returns Number of workflows owned by that session
+ */
+export async function countWorkflowsForSession(
+  sessionId: string,
+): Promise<number> {
+  const supabase = await createServerClient();
+
+  const { count, error } = await supabase
+    .from("workflows")
+    .select("id", { count: "exact", head: true })
+    .eq("session_id", sessionId);
+
+  if (error) {
+    console.error("Error counting workflows for session:", error);
+    throw error;
+  }
+
+  return count ?? 0;
+}
+
+/**
+ * Loads a workflow row only if the given session owns it.
+ *
+ * The single ownership gate used by the submit, approve, and disapprove
+ * routes. Each of those needs the row anyway, so folding the check into the
+ * fetch means there is no way to read the row without also proving ownership.
+ *
+ * @param workflowId - Workflow to load
+ * @param sessionId - Visitor session that must own it
+ * @returns The raw workflow row, or null when absent or not owned
+ */
+export async function getOwnedWorkflowRow(
+  workflowId: string,
+  sessionId: string,
+) {
+  const supabase = await createServerClient();
+
+  const { data, error } = await supabase
+    .from("workflows")
+    .select("*")
+    .eq("id", workflowId)
+    .eq("session_id", sessionId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Error fetching owned workflow:", error);
+    return null;
+  }
+
+  return data;
+}
+
+/**
+ * Deletes workflows created before a cutoff, regardless of session.
+ *
+ * Server-initiated cleanup, called only by the cron route. Bounds table
+ * growth, limits how long any injected content stays reachable, and keeps
+ * stray personal data from accumulating in a public demo.
+ *
+ * @param cutoff - Delete workflows created strictly before this instant
+ * @returns Ids of the workflows removed
+ */
+export async function deleteWorkflowsCreatedBefore(
+  cutoff: Date,
+): Promise<string[]> {
+  const supabase = await createServerClient();
+
+  const { data, error } = await supabase
+    .from("workflows")
+    .delete()
+    .lt("created_at", cutoff.toISOString())
+    .select("id");
+
+  if (error) {
+    console.error("Error expiring workflows:", error);
+    throw error;
+  }
+
+  return (data || []).map((row: { id: string }) => row.id);
 }
 
 // ============================================================================

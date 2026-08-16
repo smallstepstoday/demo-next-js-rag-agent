@@ -1,4 +1,5 @@
 import RecipientForm from "@/components/recipient-form"
+import { getDemoSessionId } from "@/lib/demo-session-server"
 import { createClient } from "@/lib/supabase/server"
 import { Card, CardContent } from "@/components/ui/card"
 import { AlertCircle } from "lucide-react"
@@ -10,10 +11,19 @@ import Link from "next/link"
  * Step 4: Recipient clicks the link and displays a form to fill out
  *
  * This is a server component that:
- * - Fetches the workflow data from Supabase
+ * - Fetches the workflow data from Supabase, scoped to the demo session
  * - Validates the workflow exists and is in the correct state
  * - Renders the RecipientForm client component with the necessary data
+ *
+ * The session scope matches the submit route's. Emails in this demo are
+ * simulated through a console log, so the "recipient" opening this link is
+ * always the same browser that created the workflow — showing a form here
+ * that submit would then reject would be the worse outcome. A production
+ * version mailing real links would give the recipient a signed, single-use
+ * link token instead.
  */
+
+export const dynamic = "force-dynamic"
 
 interface PageProps {
   params: Promise<{ workflowId: string }>
@@ -23,13 +33,16 @@ export default async function FormPage({ params }: PageProps) {
   // Await params to get the workflowId (Next.js 15+ async params)
   const { workflowId } = await params
 
+  const sessionId = await getDemoSessionId()
+
   // Create server-side Supabase client for fetching workflow data
   const supabase = await createClient()
 
-  // Fetch workflow data with related recipient information
-  const { data: workflow, error } = await supabase
-    .from("workflows")
-    .select(`
+  // Fetch workflow data with related recipient information, scoped to session
+  const { data: workflow, error } = sessionId
+    ? await supabase
+        .from("workflows")
+        .select(`
       id,
       recipient_email,
       status,
@@ -41,8 +54,10 @@ export default async function FormPage({ params }: PageProps) {
         bio_context
       )
     `)
-    .eq("id", workflowId)
-    .single()
+        .eq("id", workflowId)
+        .eq("session_id", sessionId)
+        .maybeSingle()
+    : { data: null, error: null }
 
   // Handle workflow not found
   if (error || !workflow) {
