@@ -80,10 +80,14 @@ export function BiographyReview({ workflow }: BiographyReviewProps) {
     setError("");
 
     try {
+      // The route reads `rejectionReason`. This sent `reason`, so every
+      // disapproval stored an undefined reason and emailed an empty one. The
+      // mismatch was silent until the body gained a schema; it now fails
+      // validation loudly instead.
       const response = await fetch(`/api/workflows/${workflow.id}/disapprove`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: disapprovalReason }),
+        body: JSON.stringify({ rejectionReason: disapprovalReason }),
       });
 
       if (!response.ok) {

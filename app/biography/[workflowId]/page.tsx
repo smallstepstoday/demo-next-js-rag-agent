@@ -1,3 +1,4 @@
+import { getDemoSessionId } from "@/lib/demo-session-server"
 import { getWorkflow } from "@/lib/workflow-store"
 import { notFound } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -8,8 +9,14 @@ import Link from "next/link"
 /**
  * Biography View Page (Server Component)
  *
- * Displays the approved biography in a clean, readable format
+ * Displays the approved biography in a clean, readable format.
+ *
+ * Scoped to the visitor's demo session. The text on this page is model output
+ * generated from recipient-supplied input, so it is shown only to the session
+ * that produced it — an unlisted URL is not an access control.
  */
+
+export const dynamic = "force-dynamic"
 
 interface PageProps {
   params: Promise<{ workflowId: string }>
@@ -17,9 +24,10 @@ interface PageProps {
 
 export default async function BiographyPage({ params }: PageProps) {
   const { workflowId } = await params
-  const workflow = await getWorkflow(workflowId)
+  const sessionId = await getDemoSessionId()
+  const workflow = sessionId ? await getWorkflow(workflowId, sessionId) : null
 
-  // Show 404 if workflow doesn't exist
+  // Show 404 if the workflow doesn't exist or isn't this session's
   if (!workflow) {
     notFound()
   }

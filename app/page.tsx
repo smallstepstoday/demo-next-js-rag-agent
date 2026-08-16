@@ -8,17 +8,23 @@
  *
  * The page shows a simple form at the top and a list of workflow
  * cards below showing the current status of each workflow.
+ *
+ * The list is scoped to the visitor's demo session, so it shows only the
+ * workflows this browser created. See lib/demo-session.ts.
  */
 
 import { EmailForm } from "@/components/email-form"
 import { WorkflowList } from "@/components/workflow-list"
+import { getDemoSessionId } from "@/lib/demo-session-server"
 import { getAllWorkflows } from "@/lib/workflow-store"
 
 export const dynamic = "force-dynamic"
 
 export default async function HomePage() {
-  // Fetch all workflows from Supabase to display their current status
-  const workflows = await getAllWorkflows()
+  // Fetch this session's workflows to display their current status. A visitor
+  // with no session yet has created nothing, so an empty list is correct.
+  const sessionId = await getDemoSessionId()
+  const workflows = sessionId ? await getAllWorkflows(sessionId) : []
 
   return (
     <main className="min-h-screen bg-background">

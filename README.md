@@ -31,21 +31,27 @@ This application implements a complete 9-step workflow for generating and managi
 ### Project Structure
 
 ```
+proxy.ts # Issues the signed demo_session cookie on every request
+vercel.json # Cron schedule for the demo-data expiry sweep
+
 app/
 ├── page.tsx # User landing page (Steps 1-2, 6)
 ├── form/[workflowId]/
 │ ├── page.tsx # Recipient form page (Step 4)
 │ └── success/page.tsx # Form submission success
 ├── review/[workflowId]/page.tsx # Biography review (Step 7)
-├── workflows/
-│ └── biography-workflow.ts # DurableAgent workflow definition
+├── biography/[workflowId]/page.tsx # Approved biography view
 └── api/
+├── cron/
+│ └── expire-demo-data/route.ts # Deletes workflows older than 48 hours
 └── workflows/
 ├── create/route.ts # Create workflow (Step 3)
+├── list/route.ts # List this session's workflows (Step 6)
 ├── [workflowId]/
 │ ├── submit/route.ts # Submit form (Step 4-5)
 │ ├── approve/route.ts # Approve biography (Step 8)
-│ └── disapprove/route.ts # Disapprove biography (Step 9)
+│ ├── disapprove/route.ts # Disapprove biography (Step 9)
+│ └── delete/route.ts # Delete workflow and cascade its related rows
 
 components/
 ├── email-form.tsx # Email input form
@@ -57,8 +63,13 @@ components/
 lib/
 ├── biography-generation.ts # RAG retrieval, prompt construction, compiled-input artifact, and generation
 ├── biography-generation.test.ts # Eval harness: invariance/sensitivity suites for retrieval + artifact fingerprinting
+├── demo-session.ts # Signs and verifies the demo_session cookie (Web Crypto, runs in the proxy)
+├── demo-session-server.ts # Reads the session in route handlers and Server Components
+├── validation.ts # zod schemas and length caps for every request body
+├── rate-limit.ts # Per-session burst window for create and submit
+├── api-errors.ts # Keeps Supabase error detail out of production responses
 ├── workflow-types.ts # TypeScript types for workflow
-├── workflow-store.ts # Supabase-backed state management
+├── workflow-store.ts # Supabase-backed state management, scoped by session
 ├── email-service.ts # Email sending (simulated)
 └── supabase/
 └── server.ts # Server-only Supabase client (service_role); there is no browser client
@@ -67,7 +78,8 @@ scripts/
 ├── 001_create_workflows_table.sql # Database schema setup
 ├── 002_move_tables_to_rag_demo_schema.sql # Moves tables into the rag_demo schema
 ├── 003_secure_rag_demo_schema.sql # Grants service_role access and enables RLS
-└── 004_add_generation_artifacts_table.sql # Adds workflow_generation_artifacts (compiled-input artifact storage)
+├── 004_add_generation_artifacts_table.sql # Adds workflow_generation_artifacts (compiled-input artifact storage)
+└── 005_add_session_scoping.sql # Adds workflows.session_id and clears pre-scoping rows
 ```
 
 ### Database Schema
@@ -164,6 +176,7 @@ scripts/001_create_workflows_table.sql
 scripts/002_move_tables_to_rag_demo_schema.sql
 scripts/003_secure_rag_demo_schema.sql
 scripts/004_add_generation_artifacts_table.sql
+scripts/005_add_session_scoping.sql
 
 # Then add `rag_demo` to Project Settings > Data API > Exposed schemas
 
@@ -188,6 +201,12 @@ POSTGRES_URL=your-postgres-url
 
 # Application Configuration
 NEXT_PUBLIC_APP_URL=http://localhost:3000  # Or your deployment URL
+
+# Demo session signing key. Any long random string.
+DEMO_SESSION_SECRET=your-random-secret
+
+# Required for the expiry cron. Vercel generates this when you add a cron job.
+CRON_SECRET=your-cron-secret
 ```
 
 `SUPABASE_SECRET_KEY` is the newer-format secret key (Project Settings > API
@@ -195,6 +214,15 @@ Keys > Secret keys), not the legacy `SUPABASE_SERVICE_ROLE_KEY` JWT. It
 authenticates as `service_role` and is required — RLS on `rag_demo` denies
 everything else. There's no anon/publishable key in this app; nothing reads
 Supabase from the browser.
+
+`DEMO_SESSION_SECRET` signs the `demo_session` cookie. When it is unset the app
+derives a key from `SUPABASE_SECRET_KEY` and logs a warning, so a deployment
+that predates this variable keeps working. Set it anyway: without it, rotating
+the Supabase key silently logs every visitor out of their own workflows.
+
+`CRON_SECRET` guards `/api/cron/expire-demo-data`. That route deletes data, so
+it refuses to run at all when the variable is missing rather than running
+unauthenticated.
 
 ## Usage
 
@@ -206,7 +234,14 @@ Before first use, run the database migrations in order:
 2. Run `scripts/002_move_tables_to_rag_demo_schema.sql` — moves those tables into a dedicated `rag_demo` schema
 3. Run `scripts/003_secure_rag_demo_schema.sql` — grants `service_role` access and enables RLS so the tables aren't publicly readable/writable
 4. Run `scripts/004_add_generation_artifacts_table.sql` — adds `workflow_generation_artifacts` for the compiled-input artifact (see [Eval Workflow and the Compiled-Input Artifact](#eval-workflow-and-the-compiled-input-artifact))
-5. In the Supabase dashboard, add `rag_demo` to the exposed schemas (Project Settings > Data API > Exposed schemas) so PostgREST can serve it
+5. Run `scripts/005_add_session_scoping.sql` — adds `workflows.session_id` and deletes any rows created before scoping existed (see [Demo security model](#demo-security-model))
+6. In the Supabase dashboard, add `rag_demo` to the exposed schemas (Project Settings > Data API > Exposed schemas) so PostgREST can serve it
+
+On an existing deployment, run migration 005 and ship the matching code
+together. `session_id` is `NOT NULL` with no default, so an older build's
+insert fails rather than writing a workflow nobody owns. That is the safe
+direction to fail, but it does break workflow creation for however long the two
+are out of step.
 
 ### 2. Create a New Workflow
 
@@ -325,9 +360,15 @@ export async function sendEmail(payload: EmailPayload) {
 The application uses AI SDK v5 with the Vercel AI Gateway:
 
 - **Default model**: `openai/gpt-5-mini`
-- **Biography generation**: 500 max tokens, temperature 0.7
+- **Biography generation**: 2000 max output tokens, temperature 0.7
 - **Automatic retries**: Built into Workflow steps
 - **No API key required**: Uses Vercel AI Gateway by default
+
+The 2000 is not headroom for a longer biography. `gpt-5-mini` is a reasoning
+model, so `maxOutputTokens` covers hidden reasoning tokens as well as visible
+text. At 500 the output truncated mid-sentence, and after the `ai` 7.x upgrade
+raised reasoning-token usage for the same prompt, reasoning consumed the entire
+budget and generations came back empty.
 
 To use a different model or provider:
 
@@ -362,12 +403,19 @@ anyway.
 
 All workflow operations in `lib/workflow-store.ts`:
 
-```typescript
-// Create workflow
-const workflow = await createWorkflow(recipientEmail);
+Anything a visitor can reach takes a `sessionId` and filters on it. The
+parameter is required rather than optional, so a call site that forgets it
+fails to compile instead of quietly reading every row.
 
-// Get workflow with all related data
-const workflow = await getWorkflow(workflowId);
+```typescript
+// Create workflow, owned by this session
+const workflowId = await createWorkflow(recipientEmail, sessionId);
+
+// Get workflow with all related data, if this session owns it
+const workflow = await getWorkflow(workflowId, sessionId);
+
+// Count this session's workflows (backs the durable rate limit)
+const count = await countWorkflowsForSession(sessionId);
 
 // Update status
 await updateWorkflowStatus(workflowId, "pending_approval");
@@ -381,16 +429,84 @@ await saveBiography(workflowId, biographyText);
 // Approve/reject
 await approveBiography(workflowId);
 await rejectBiography(workflowId, reason);
+
+// Delete, scoped to the owning session. Returns false when nothing matched.
+const deleted = await deleteWorkflow(workflowId, sessionId);
 ```
 
 ### Schema Migrations
 
 To modify the schema:
 
-1. Create a new file: `scripts/002_your_migration.sql`
+1. Create a new file: `scripts/006_your_migration.sql`
 2. Write SQL migration code
 3. Run via Supabase SQL Editor
 4. Never edit executed scripts - always create new ones
+
+## Demo security model
+
+This app is deployed publicly with no login, and that is the design constraint
+rather than an oversight. There is no identity to check, so the limits have to
+sit on what any one visitor can reach and how much they can spend.
+
+### Session scoping
+
+Every visitor gets a signed, httpOnly `demo_session`
+cookie, issued in `proxy.ts`. Workflows record the session that created them in
+`workflows.session_id`, and the list, form, review, biography, submit, approve,
+disapprove, and delete paths all filter on it. Each filter is in the SQL rather
+than in a check preceding the query, so a workflow owned by another visitor is
+reported the same way as one that does not exist, and no window opens between
+proving ownership and writing.
+
+Because the `service_role` client bypasses RLS, that one column is what enforces
+the boundary. RLS protects the tables from the outside; it has nothing to say
+about the app's own key.
+
+### Input validation
+
+Request bodies are parsed against zod schemas with hard
+length caps in `lib/validation.ts`: 100 characters for name and occupation, ten
+skills of 50 characters, 1000 for achievements, 500 for interests. The caps
+carry more weight than the type checking does. `buildBiographyPrompt` inlines
+those fields, so an uncapped request can build a prompt of any size it likes.
+
+### Rate limits
+
+`create` and `submit` are the two routes that cost money. Each
+session gets a burst window from `lib/rate-limit.ts` plus a durable ceiling of
+20 workflows, counted in the database. Submitting a workflow that already has a
+biography returns 409, so one workflow id cannot be replayed for repeated
+generations. The burst window lives in instance memory and resets on a cold
+start. The row counts do not.
+
+None of this stops someone who discards their cookie between requests: a fresh
+session gets a fresh allowance. That is the unavoidable shape of rate limiting
+without accounts, and it is why the gateway budget below is the actual ceiling
+rather than a nice-to-have.
+
+### Prompt handling
+
+Recipient-supplied text sits below an explicit delimiter,
+under an instruction to treat everything after it as data, and delimiter markers
+inside the submitted text are stripped. That lowers the odds of a successful
+injection without removing them, which is why the approval gate matters: no
+generated text reaches the biography page until a person clicks approve.
+
+### Data expiry
+
+A daily cron deletes workflows older than 48 hours, which is
+also the session cookie lifetime, so a visitor's session and their data run out
+together.
+
+### Gateway budget
+
+The ceiling on total model spend belongs at the AI Gateway, as
+a project-scoped budget with a daily refresh period instead of the monthly
+default. A daily cap turns a runaway script into a bad afternoon rather than a
+monthly bill, and requests are rejected with HTTP 402 once it trips. That is
+dashboard configuration, so it is not in this repository and has to be set on
+the project directly.
 
 ## Production Considerations
 
@@ -443,13 +559,23 @@ Add comprehensive monitoring:
 
 ### 5. Security Checklist
 
-- ✅ Enable RLS on all tables
-- ✅ Add authentication
-- ✅ Validate all user inputs
-- ✅ Rate limit API endpoints
-- ✅ Implement CSRF protection
-- ✅ Use environment variables for secrets
-- ✅ Enable Supabase email confirmation
+What the demo already does, described in [Demo security model](#demo-security-model):
+
+- RLS enabled on all tables, with no `anon` or `authenticated` policies
+- Every request body validated and length-capped
+- Rate limits on the two routes that call the model
+- Secrets in environment variables, read only on the server
+- Error detail suppressed in production responses
+
+What a production deployment still needs:
+
+- Real authentication, replacing the per-visitor session cookie
+- Explicit CSRF tokens on the state-changing routes. The session cookie is
+  `SameSite=Lax`, so a cross-site POST does not carry it, but that is a
+  side effect rather than a defense anyone chose
+- Supabase email confirmation
+- A signed, single-use link token for the recipient, so the form does not depend
+  on the operator's session
 
 ## Troubleshooting
 
